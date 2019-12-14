@@ -10,6 +10,35 @@ Cockatiel is resilience and transient-fault-handling library that allows develop
 npm install --save cockatiel
 ```
 
+Then go forth with confidence:
+
+```js
+// alternatively: const { Policy, ConsecutiveBreaker } = require('cockatiel');
+import { Policy, ConsecutiveBreaker } from 'cockatiel';
+import { database } from './my-db';
+
+// Create a retry policy that'll try whatever function we execute 3
+// times with a randomized exponential backoff.
+const retry = Policy.handleAll()
+  .retry()
+  .attempts(3)
+  .exponential();
+
+// Create a circuit breaker that'll stop calling the executed function for 10
+// seconds if it fails 5 times in a row. This can give time for e.g. a database
+// to recover without getting tons of traffic.
+const circuitBreaker = Policy.handleAll().circuitBreaker(10 * 1000, new ConsecutiveBreaker(5));
+
+// Combine these! Create a policy that retries 3 times, calling through the circuit breaker
+const retryWithBreaker = Policy.wrap(retry, circuitBreaker);
+
+exports.handleRequest = async (req, res) => {
+  // Call your database safely!
+  const data = await retryWithBreaker.execute(() => database.getInfo(req.params.id));
+  return res.json(data);
+};
+```
+
 ## Contents
 
 This table lists the API which Cockatiel provides. I recommend reading the [Polly wiki](https://github.com/App-vNext/Polly/wiki) for more information for details and mechanics around the patterns we provide.
@@ -76,57 +105,55 @@ The Policy defines how errors and results are handled. Everything in Cockatiel u
 Tells the policy to handle _all_ errors.
 
 ```ts
-Policy
-  .handleAll()
-  // ...
+Policy.handleAll();
+// ...
 ```
 
 ### `Policy.handleType(ctor[, filter])`
+
 ### `policy.orType(ctor[, filter])`
 
 Tells the policy to handle errors of the given type, passing in the contructor. If a `filter` function is also passed, we'll only handle errors if that also returns true.
 
 ```ts
-Policy
-  .handleType(NetworkError)
-  .orType(HttpError, err => err.statusCode === 503)
-  // ...
+Policy.handleType(NetworkError).orType(HttpError, err => err.statusCode === 503);
+// ...
 ```
 
 ### `Policy.handleWhen(filter)`
+
 ### `policy.orWhen(filter)`
 
 Tells the policy to handle any error for which the filter returns truthy
 
 ```ts
-Policy
-  .handleWhen(err => err instanceof NetworkError)
-  .orWhen(err => err.shouldRetry === true)
-  // ...
+Policy.handleWhen(err => err instanceof NetworkError).orWhen(err => err.shouldRetry === true);
+// ...
 ```
 
 ### `Policy.handleResultType(ctor[, filter])`
+
 ### `policy.orResultType(ctor[, filter])`
 
 Tells the policy to treat certain return values of the function as errors--retrying if they appear, for instance. Results will be retried if they're an instance of the given class. If a `filter` function is also passed, we'll only treat return values as errors if that also returns true.
 
 ```ts
-Policy
-  .handleResultType(ReturnedNetworkError)
-  .orResultType(HttpResult, res => res.statusCode === 503)
-  // ...
+Policy.handleResultType(ReturnedNetworkError).orResultType(
+  HttpResult,
+  res => res.statusCode === 503,
+);
+// ...
 ```
 
 ### `Policy.handleResultWhen(filter)`
+
 ### `policy.orWhenResult(filter)`
 
 Tells the policy to treat certain return values of the function as errors--retrying if they appear, for instance. Results will be retried the filter function returns true.
 
 ```ts
-Policy
-  .handleResultWhen(res => res.statusCode === 503)
-  .orWhenResult(res => res.statusCode === 429)
-  // ...
+Policy.handleResultWhen(res => res.statusCode === 503).orWhenResult(res => res.statusCode === 429);
+// ...
 ```
 
 ### `Policy.wrap(...policies)`
@@ -135,8 +162,8 @@ Wraps the given set of policies into a single policy. For instance, this:
 
 ```js
 const result = await retry.execute(() =>
-  breaker.execute(() =>
-    timeout.execute(({ cancellation }) => getData(cancellation))))
+  breaker.execute(() => timeout.execute(({ cancellation }) => getData(cancellation))),
+);
 ```
 
 Is the equivalent to:
@@ -163,7 +190,11 @@ A no-op policy, which may be useful for tests and stubs.
 ```ts
 import { Policy } from 'cockatiel';
 
-const policy = isProduction ? Policy.handleAll().retry().attempts(3) : Policy.noop;
+const policy = isProduction
+  ? Policy.handleAll()
+      .retry()
+      .attempts(3)
+  : Policy.noop;
 
 export async function handleRequest() {
   return policy.execute(() => getInfoFromDatabase());
@@ -205,7 +236,7 @@ const limitedBackoff = new ConstantBackoff(50, 3);
 
 > Tip: exponential backoffs and [circuit breakers](#policycircuitbreakeropenafter-breaker) are great friends!
 
-The crowd favorite. Takes in an options object, which can have any of these properties:
+The crowd favorite. By default, it uses a decorrelated jitter algorithm, which is a good default for most applications. Takes in an options object, which can have any of these properties:
 
 ```ts
 export interface IExponentialBackoffOptions<S> {
@@ -245,12 +276,24 @@ export interface IExponentialBackoffOptions<S> {
 Example:
 
 ```ts
-// Use all the defaults:
+import { ExponentialBackoff, noJitterGenerator } from 'cockatiel';
+
+// Use all the defaults. Decorrelated jitter, 30 seconds max delay, infinite attempts:
 const defaultBackoff = new ExponentialBackoff();
 
 // Have some lower limits:
-const limitedBackoff = new ExponentialBackoff({ maxDelay: 1000, initialDelay: 4 );
+const limitedBackoff = new ExponentialBackoff({ maxDelay: 1000, initialDelay: 4 });
+
+// Use a backoff without jitter
+const limitedBackoff = new ExponentialBackoff({ generator: noJitterGenerator });
 ```
+
+Several jitter strategies are provided. This [AWS blog post](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) has more information around the strategies and why you might want to use them. The available jitter generators exported from `cockatiel` are:
+
+- `decorrelatedJitterGenerator` -- The default implementation, the one that [Polly.Contrib.WaitAndRetry uses](https://github.com/Polly-Contrib/Polly.Contrib.WaitAndRetry/tree/79224cff9670b159418f955af4d0a9ebc2a09778#new-jitter-recommendation)
+- `noJitterGenerator` -- Does not add any jitter
+- `fullJitterGenerator` -- Jitters between `[0, interval)`
+- `halfJitterGenerator` -- Jitters between `[interval / 2, interval)`
 
 ### IterableBackoff
 
@@ -267,7 +310,7 @@ Delegates determining the backoff to the given function. The function can return
 
 ```ts
 // Try with a 500ms delay asa long as `shouldGiveUp` is false.
-const backoff = new DelegateBackoff(context => shouldGiveUp ? undefined : 500);
+const backoff = new DelegateBackoff(context => (shouldGiveUp ? undefined : 500));
 ```
 
 The first parameter is the generic `context` in which the backoff is being used. For retries, the context is an interface like this:
@@ -284,7 +327,6 @@ export interface IRetryBackoffContext<ReturnType> {
    */
   result: { error: Error } | { value: ReturnType };
 }
-
 ```
 
 You can also take in a `state` as the second parameter, and return an object containing the `{ state: S, delay: number }`. Here's both of those in action that we use to create a backoff policy that will stop backing off if we get the same error twice in a row, otherwise do an exponential backoff:
@@ -297,7 +339,6 @@ const myDelegateBackoff = new DelegateBackoff((context, lastError) => {
 
   return 100 * Math.pow(2, context.count);
 });
-
 ```
 
 ### CompositeBackoff
@@ -327,8 +368,10 @@ const source1 = new CancellationTokenSource();
 const token1 = source1.token;
 
 // You can listen to an event, await a promise, or just check a synchronous value...
-token1.onCancellationRequested(() => console.log('source1 cancelled');
-token1.cancellation().then(() => { /* ... */ });
+token1.onCancellationRequested(() => console.log('source1 cancelled'));
+token1.cancellation().then(() => {
+  /* ... */
+});
 
 if (token1.isCancellationRequested) {
   console.log('source1 already cancelled!');
@@ -336,7 +379,7 @@ if (token1.isCancellationRequested) {
 
 // You can the nest new cancellation token sources:
 const source2 = new CancellationTokenSource(token1);
-source2.onCancellationRequested(() => console.log('source2 cancelled');
+source2.onCancellationRequested(() => console.log('source2 cancelled'));
 
 // And, finally, cancel tokens, which will cascade down to all children:
 source1.cancel();
@@ -382,7 +425,7 @@ if (token.isCancellationRequested) {
 An [event emitter](#events) that fires when a cancellation is requested. Fires immediately if cancellation has already been requested. Returns a disposable instance.
 
 ```ts
-const listener = token.onCancellationRequested(() => console.log('cancellation requested'))
+const listener = token.onCancellationRequested(() => console.log('cancellation requested'));
 
 // later:
 listener.dispose();
@@ -411,7 +454,7 @@ const listener = policy.onFallback(error => {
 The event returns an `IDisposable` instance. To unsubscribe the listener, call `.dispose()` on the returned instance. It's always safe to call an IDisposable's `.dispose()` multiple times.
 
 ```js
-listener.dispose()
+listener.dispose();
 ```
 
 We provide a couple extra utilities around events as well.
@@ -450,14 +493,12 @@ If you know how to use Polly, you already almost know how to use Cockatiel. The 
 Here are some example:
 
 ```ts
-const response1 = await Policy
-  .handleAll() // handle all errors
+const response1 = await Policy.handleAll() // handle all errors
   .retry() // get a RetryBuilder
   .attempts(3) // retry three times, with no delay
   .execute(() => getJson('https://example.com'));
 
-const response1 = await Policy
-  .handleType(NetworkError) // only catch network errors
+const response1 = await Policy.handleType(NetworkError) // only catch network errors
   .retry()
   .execute(() => getJson('https://example.com'));
 ```
@@ -469,8 +510,7 @@ Executes the function. The current retry context, containing the current `{ atte
 If the function doesn't succeed before the backoff ceases, the last error thrown will be bubbled up, or the last result will be returned (if you used any of the `Policy.handleResult*` methods).
 
 ```ts
-await Policy
-  .handleAll()
+await Policy.handleAll()
   .retry()
   .execute(() => getJson('https://example.com'));
 ```
@@ -480,11 +520,10 @@ await Policy
 Sets the maximum number of retry attempts.
 
 ```ts
-Policy
-  .handleAll()
+Policy.handleAll()
   .retry()
-  .attempts(3)
-  // ...
+  .attempts(3);
+// ...
 ```
 
 ### `retry.delay(amount)`
@@ -493,19 +532,17 @@ Sets the delay between retries. You can pass a single number, or a list of retry
 
 ```ts
 // retry 5 times, with 100ms between them
-Policy
-  .handleAll()
+Policy.handleAll()
   .retry()
   .attempts(5)
-  .delay(100)
-  // ...
+  .delay(100);
+// ...
 
 // retry 3 times, increasing delays between them
-Policy
-  .handleAll()
+Policy.handleAll()
   .retry()
-  .delay([100, 200, 300])
-  // ...
+  .delay([100, 200, 300]);
+// ...
 ```
 
 ### `retry.exponential(options)`
@@ -525,11 +562,10 @@ Policy
 Creates a delegate backoff. See [DelegateBackoff](#DelegateBackoff) for more details here.
 
 ```ts
-Policy
-  .handleAll()
+Policy.handleAll()
   .retry()
-  .delegate(context => 100 * Math.pow(2, context.attempt))
-  // ...
+  .delegate(context => 100 * Math.pow(2, context.attempt));
+// ...
 ```
 
 ### `retry.backoff(policy)`
@@ -537,19 +573,18 @@ Policy
 Uses a custom backoff strategy for retries.
 
 ```ts
-Policy
-  .handleAll()
+Policy.handleAll()
   .retry()
-  .backoff(myBackoff)
-  // ...
+  .backoff(myBackoff);
+// ...
 ```
 
 ### `retry.onRetry(callback)`
 
 An [event emitter](#events) that fires when we retry a call, before any backoff. It's invoked with an object that includes:
 
- - the `delay` we're going to wait before retrying, and;
- - either a thrown error like `{ error: someError, delay: number }`, or an errorful result in an object like `{ value: someValue, delay: number }` when using [result filtering](#policyhandleresulttypector-filter).
+- the `delay` we're going to wait before retrying, and;
+- either a thrown error like `{ error: someError, delay: number }`, or an errorful result in an object like `{ value: someValue, delay: number }` when using [result filtering](#policyhandleresulttypector-filter).
 
 Useful for telemetry. Returns a dispable instance.
 
@@ -585,14 +620,13 @@ Calls to `execute()` while the circuit is open (not taking requests) will throw 
 import { Policy, BrokenCircuitError, ConsecutiveBreaker, SamplingBreaker } from 'cockatiel';
 
 // Break if more than 20% of requests fail in a 30 second time window:
-const breaker = Policy
- .handleAll()
- .circuitBreaker(10 * 1000, new SamplingBreaker({ threshold: 0.2, duration: 30 * 1000 }));
+const breaker = Policy.handleAll().circuitBreaker(
+  10 * 1000,
+  new SamplingBreaker({ threshold: 0.2, duration: 30 * 1000 }),
+);
 
 // Break if more than 5 requests in a row fail:
-const breaker = Policy
- .handleAll()
- .circuitBreaker(10 * 1000, new ConsecutiveBreaker(5));
+const breaker = Policy.handleAll().circuitBreaker(10 * 1000, new ConsecutiveBreaker(5));
 
 // Get info from the database, or return 'service unavailable' if it's down/recovering
 export async function handleRequest() {
@@ -614,9 +648,7 @@ The `ConsecutiveBreaker` breaks after `n` requests in a row fail. Simple, easy.
 
 ```js
 // Break if more than 5 requests in a row fail:
-const breaker = Policy
- .handleAll()
- .circuitBreaker(10 * 1000, new ConsecutiveBreaker(5));
+const breaker = Policy.handleAll().circuitBreaker(10 * 1000, new ConsecutiveBreaker(5));
 ```
 
 ### `SamplingBreaker`
@@ -625,21 +657,23 @@ The `SamplingBreaker` breaks after a proportion of requests over a time period f
 
 ```js
 // Break if more than 20% of requests fail in a 30 second time window:
-const breaker = Policy
- .handleAll()
- .circuitBreaker(10 * 1000, new SamplingBreaker({ threshold: 0.2, duration: 30 * 1000 }));
+const breaker = Policy.handleAll().circuitBreaker(
+  10 * 1000,
+  new SamplingBreaker({ threshold: 0.2, duration: 30 * 1000 }),
+);
 ```
 
 You can specify a minimum requests-per-second value to use to avoid closing the circuit under period of low load. By default we'll choose a value such that you need 5 failures per second for the breaker to kick in, and you can configure this if it doesn't work for you:
 
 ```js
-const breaker = Policy
- .handleAll()
- .circuitBreaker(10 * 1000, new SamplingBreaker({
-   threshold: 0.2,
-   duration: 30 * 1000,
-   minimumRps: 10, // require 10 requests per second before we can break
-  }));
+const breaker = Policy.handleAll().circuitBreaker(
+  10 * 1000,
+  new SamplingBreaker({
+    threshold: 0.2,
+    duration: 30 * 1000,
+    minimumRps: 10, // require 10 requests per second before we can break
+  }),
+);
 ```
 
 ### `breaker.execute(fn)`
@@ -700,6 +734,7 @@ handle.dispose();
 ## `Policy.timeout(duration, strategy)`
 
 Creates a timeout policy. The duration specifies how long to wait before timing out `execute()`'d functions. The strategy for timeouts, "Cooperative" or "Aggressive". A [ CancellationToken](#cancellationtoken) will be pass to any executed function, and in cooperative timeouts we'll simply wait for that function to return or throw. In aggressive timeouts, we'll immediately throw a TaskCancelledError when the timeout is reached, in addition to marking the passed token as failed.
+
 ```js
 import { TimeoutStrategy, Policy, TaskCancelledError } from 'cockatiel';
 
@@ -708,8 +743,7 @@ const timeout = Policy.timeout(2000, TimeoutStrategy.Cooperative);
 // Get info from the database, or return if it didn't respond in 2 seconds
 export async function handleRequest() {
   try {
-    return await timeout.execute(
-      cancellationToken => getInfoFromDatabase(cancellationToken));
+    return await timeout.execute(cancellationToken => getInfoFromDatabase(cancellationToken));
   } catch (e) {
     if (e instanceof TaskCancelledError) {
       return 'database timed out';
@@ -725,7 +759,7 @@ export async function handleRequest() {
 Executes the given function as configured in the policy. A [CancellationToken](#cancellationtoken) will be pass to the function, which it should use for aborting operations as needed.
 
 ```ts
-await timeout.execute(cancellationToken => getInfoFromDatabase(cancellationToken))
+await timeout.execute(cancellationToken => getInfoFromDatabase(cancellationToken));
 ```
 
 ### `timeout.onTimeout(callback)`
@@ -806,9 +840,7 @@ Creates a policy that returns the `valueOrFactory` if an executed function fails
 ```js
 import { Policy } from 'cockatiel';
 
-const fallback = Policy
- .handleType(DatabaseError)
- .fallback(() => getStaleData());
+const fallback = Policy.handleType(DatabaseError).fallback(() => getStaleData());
 
 export function handleRequest() {
   return fallback.execute(() => getInfoFromDatabase());
